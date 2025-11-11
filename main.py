@@ -34,6 +34,7 @@ async def handle_root(request):
     return web.Response(text="✅ Скрипт живий і стежить за графіком")
 
 async def handle_ping(request):
+    print(f"👋 Отримано пінг від {request.remote} у {datetime.datetime.now().strftime('%H:%M:%S')}")
     return web.Response(text="pong")
 
 async def start_web_server():
