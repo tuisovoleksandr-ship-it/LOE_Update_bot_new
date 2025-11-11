@@ -103,8 +103,8 @@ async def check_and_send():
                                 async with bot:
                                     await bot.send_photo(
                                         chat_id=CHAT_ID,
-                                        photo=r.content,
-                            caption="⚡ Нове оновлення графіка відключень електроенергії"
+                                        photo=image_data,
+                            caption=f"⚡ Нове оновлення графіка відключень електроенергії"
                                     )
                                 print(f"✅ [{now}] Зображення відправлено в Telegram")
                                 last_hash = current_hash
