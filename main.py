@@ -5,13 +5,14 @@ from datetime import datetime
 from telegram import Bot
 from telegram.error import TelegramError
 from playwright.async_api import async_playwright
+import aiohttp
 
 # -------------------------------
 # Конфигурация
 # -------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-SELF_URL = os.environ.get("EXTERNAL_URL")  # https://your-app.onrender.com
+SELF_URL = os.environ.get("EXTERNAL_URL")  # https://твоя-аппликация.onrender.com
 
 CHECK_INTERVAL = 300  # интервал проверки в секундах
 SITE_URL = "https://poweron.loe.lviv.ua"
@@ -42,7 +43,7 @@ async def send_photo(bot: Bot, img_content):
         print(f"❌ Неизвестная ошибка при отправке: {e}")
 
 # -------------------------------
-# Проверка страницы
+# Проверка страницы и картинки
 # -------------------------------
 async def check_page(bot: Bot):
     global last_hash
@@ -97,7 +98,6 @@ async def main_loop():
 # Self-ping для Render
 # -------------------------------
 async def self_ping():
-    import aiohttp
     async with aiohttp.ClientSession() as session:
         while True:
             try:
