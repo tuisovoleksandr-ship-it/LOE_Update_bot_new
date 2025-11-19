@@ -7,34 +7,34 @@ from pathlib import Path
 from aiohttp import web
 from telegram import Bot
 from telegram.error import TelegramError
+from bs4 import BeautifulSoup
 
 # --- Конфігурація ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID_RAW = os.environ.get("CHAT_ID")
-IMAGE_URL = "https://api.loe.lviv.ua/media/691d6ab3b2c3a_GPV-mobile.png"
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 300))
 HASH_FILE = "last_hash.txt"
 PORT = int(os.environ.get("PORT", 8080))
 EXTERNAL_URL = os.environ.get("EXTERNAL_URL", "")
 
-# Быстрая валидация обязательных переменных
+# Валідація ENV
 if not BOT_TOKEN:
-    raise RuntimeError("ENV Error: BOT_TOKEN не задан. Додай в .env BOT_TOKEN.")
+    raise RuntimeError("ENV Error: BOT_TOKEN не заданий!")
 if not CHAT_ID_RAW:
-    raise RuntimeError("ENV Error: CHAT_ID не задан. Додай в .env CHAT_ID.")
+    raise RuntimeError("ENV Error: CHAT_ID не заданий!")
 
-# Попробуем привести CHAT_ID к int, если это число; иначе оставим строкой
 try:
     CHAT_ID = int(CHAT_ID_RAW)
 except ValueError:
-    CHAT_ID = CHAT_ID_RAW  # возможно -100... строкой — Telegram это тоже принимает
+    CHAT_ID = CHAT_ID_RAW
 
-# --- Веб-сервер ---
+# --- Web-сервер ---
 async def handle_root(request):
-    return web.Response(text="✅ Скрипт живий і стежить за графіком")
+    return web.Response(text="✅ Скрипт працює")
 
 async def handle_ping(request):
-    print(f"👋 Отримано пінг від {request.remote} у {datetime.datetime.now().strftime('%H:%M:%S')}")
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"👋 Пінг від {request.remote} у {now}")
     return web.Response(text="pong")
 
 async def start_web_server():
@@ -44,9 +44,9 @@ async def start_web_server():
 
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    print(f"✅ Веб-сервер запущено на порту {PORT}")
+    print(f"🌐 Web-сервер запущено на порту {PORT}")
 
 # --- Робота з хешем ---
 def load_last_hash():
@@ -60,30 +60,60 @@ def load_last_hash():
 
 def save_hash(hash_value):
     try:
-        # простая запись — можно улучшить атомарностью при желании
         Path(HASH_FILE).write_text(hash_value)
     except Exception as e:
         print(f"Помилка збереження хешу: {e}")
 
+# --- Парсинг HTML для пошуку актуального URL картинки ---
+async def get_actual_image_url(session):
+    PAGE_URL = "https://poweron.loe.lviv.ua/shedule-off"
+
+    try:
+        async with session.get(PAGE_URL, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                print(f"⚠️ Не вдалося завантажити HTML (HTTP {resp.status})")
+                return None
+
+            html = await resp.text()
+            soup = BeautifulSoup(html, "html.parser")
+
+            img = soup.find("img", src=lambda x: x and "GPV-mobile" in x)
+            if not img:
+                print("⚠️ На сторінці не знайдено зображення GPV-mobile")
+                return None
+
+            src = img.get("src")
+
+            # Якщо шлях відносний
+            if src.startswith("/"):
+                src = "https://poweron.loe.lviv.ua" + src
+
+            print(f"🔍 Знайдено актуальний URL: {src}")
+            return src
+
+    except Exception as e:
+        print(f"❌ Помилка парсингу HTML: {e}")
+        return None
+
 # --- Self-ping ---
 async def keep_alive():
     if not EXTERNAL_URL:
-        print("⚠️ EXTERNAL_URL не налаштовано, self-ping вимкнено")
+        print("⚠️ EXTERNAL_URL не заданий — self-ping вимкнено")
         return
 
-    ping_url = f"{EXTERNAL_URL.rstrip('/')}/ping"
-    await asyncio.sleep(60)  # дать время на старт сервиса
+    ping_url = EXTERNAL_URL.rstrip("/") + "/ping"
+    await asyncio.sleep(60)
     print(f"🔁 Self-ping активовано: {ping_url}")
 
     async with aiohttp.ClientSession() as session:
         while True:
             now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             try:
-                async with session.get(ping_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                async with session.get(ping_url, timeout=10) as response:
                     if response.status == 200:
-                        print(f"✅ Self-ping успішний ({now})")
+                        print(f"✅ Self-ping OK ({now})")
                     else:
-                        print(f"⚠️ Self-ping повернув статус {response.status} ({now})")
+                        print(f"⚠️ Self-ping статус {response.status} ({now})")
             except Exception as e:
                 print(f"❌ Помилка self-ping: {e} ({now})")
 
@@ -94,55 +124,58 @@ async def check_and_send():
     last_hash = load_last_hash()
 
     if last_hash:
-        print(f"Завантажено збережений хеш: {last_hash[:8]}...")
+        print(f"Завантажено хеш: {last_hash[:8]}")
     else:
-        print("Перший запуск, хеш не знайдено")
+        print("Хеш відсутній — перший запуск")
 
-    # Создаём бот как асинхронный контекст один раз
     async with Bot(token=BOT_TOKEN) as bot:
         async with aiohttp.ClientSession() as session:
             while True:
                 now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                try:
-                    async with session.get(IMAGE_URL, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                        if response.status == 200:
-                            image_data = await response.read()
-                            current_hash = hashlib.md5(image_data).hexdigest()
 
-                            if current_hash != last_hash:
-                                print(f"🆕 [{now}] Виявлено зміни! Новий хеш: {current_hash[:8]}...")
-                                try:
-                                    # отправляем картинку
-                                    await bot.send_photo(
-                                        chat_id=CHAT_ID,
-                                        photo=image_data,
-                                        caption="⚡ Нове оновлення графіка відключень електроенергії"
-                                    )
-                                    print(f"✅ [{now}] Зображення відправлено в Telegram")
-                                    last_hash = current_hash
-                                    save_hash(current_hash)
-                                except TelegramError as e:
-                                    print(f"❌ [{now}] Помилка Telegram: {e}")
-                                except Exception as e:
-                                    print(f"❌ [{now}] Невідома помилка при відправці: {e}")
-                            else:
-                                print(f"ℹ️ [{now}] Без змін (хеш: {current_hash[:8]}...)")
+                image_url = await get_actual_image_url(session)
+                if not image_url:
+                    print(f"🚫 [{now}] Не вдалося знайти URL картинки")
+                    await asyncio.sleep(CHECK_INTERVAL)
+                    continue
+
+                try:
+                    async with session.get(image_url, timeout=15) as resp:
+                        if resp.status != 200:
+                            print(f"⚠️ [{now}] Помилка завантаження картинки: HTTP {resp.status}")
+                            await asyncio.sleep(CHECK_INTERVAL)
+                            continue
+
+                        img_data = await resp.read()
+                        current_hash = hashlib.md5(img_data).hexdigest()
+
+                        if current_hash != last_hash:
+                            print(f"🆕 [{now}] Новий графік! Хеш: {current_hash[:8]}")
+                            try:
+                                await bot.send_photo(
+                                    chat_id=CHAT_ID,
+                                    photo=img_data,
+                                    caption="⚡ Оновлено графік відключень електроенергії"
+                                )
+                                last_hash = current_hash
+                                save_hash(current_hash)
+                                print(f"📨 [{now}] Відправлено в Telegram")
+                            except TelegramError as e:
+                                print(f"❌ Помилка Telegram: {e}")
                         else:
-                            print(f"⚠️ [{now}] Помилка завантаження: HTTP {response.status}")
-                except asyncio.TimeoutError:
-                    print(f"⏱️ [{now}] Таймаут при завантаженні зображення")
+                            print(f"ℹ️ [{now}] Без змін (хеш {current_hash[:8]})")
+
                 except Exception as e:
-                    print(f"❌ [{now}] Помилка: {e}")
+                    print(f"❌ [{now}] Помилка завантаження: {e}")
 
                 await asyncio.sleep(CHECK_INTERVAL)
 
 # --- Запуск ---
 async def main():
-    print("🚀 Запуск моніторингу графіка відключень…")
-    print(f"URL зображення: {IMAGE_URL}")
-    print(f"Інтервал перевірки: {CHECK_INTERVAL} секунд")
+    print("🚀 Скрипт запущено!")
+    print(f"Інтервал перевірки: {CHECK_INTERVAL} сек")
     print(f"Telegram Chat ID: {CHAT_ID}")
-    print(f"EXTERNAL_URL: {EXTERNAL_URL or 'не задано'}")
+    print(f"Self-ping URL: {EXTERNAL_URL or '—'}")
     print("-" * 50)
 
     await asyncio.gather(
@@ -155,9 +188,8 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 Зупинка скрипта…")
+        print("🛑 Зупинка…")
     except Exception as e:
-        # выводим полную информацию об ошибке — удобно при отладке
         import traceback
         print("💥 Критична помилка:")
         traceback.print_exc()
