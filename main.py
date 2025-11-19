@@ -11,7 +11,7 @@ from telegram.error import TelegramError
 # --- Конфігурація ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID_RAW = os.environ.get("CHAT_ID")
-IMAGE_URL = "https://api.loe.lviv.ua/media/690e8dca879d5_GPV-mobile.png"
+IMAGE_URL = "https://api.loe.lviv.ua/media/691d6ab3b2c3a_GPV-mobile.png"
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 300))
 HASH_FILE = "last_hash.txt"
 PORT = int(os.environ.get("PORT", 8080))
