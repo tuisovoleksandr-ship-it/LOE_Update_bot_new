@@ -1,107 +1,103 @@
-import re
-import requests
-import hashlib
 import asyncio
-import aiohttp
-from aiohttp import web
+import hashlib
 import os
 from datetime import datetime
+from telegram import Bot
+from telegram.error import TelegramError
+from playwright.async_api import async_playwright
 
 # -------------------------------
-# Конфігурація
+# Конфигурация
 # -------------------------------
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-SELF_URL = os.environ.get("EXTERNAL_URL")  # https://your-service.onrender.com/
+SELF_URL = os.environ.get("EXTERNAL_URL")  # https://your-app.onrender.com
 
-POWERON_URL = "https://poweron.loe.lviv.ua"
-REGEX_PATTERN = r"https:\/\/api\.loe\.lviv\.ua\/media\/[A-Za-z0-9_]+_GPV-mobile\.png"
-
-CHECK_INTERVAL = 60  # перевірка раз на 60 сек
+CHECK_INTERVAL = 300  # интервал проверки в секундах
+SITE_URL = "https://poweron.loe.lviv.ua"
+IMG_SELECTOR = "img[src*='_GPV-mobile.png']"
 
 last_hash = None
 
-
 # -------------------------------
-# Функція пошуку URL картинки
-# -------------------------------
-def extract_image_url(html: str):
-    match = re.search(REGEX_PATTERN, html)
-    if match:
-        return match.group(0)
-    return None
-
-
-# -------------------------------
-# Обчислення SHA256
+# Функция для хеша картинки
 # -------------------------------
 def sha256_bytes(content: bytes):
     return hashlib.sha256(content).hexdigest()
 
-
 # -------------------------------
-# Відправка в Telegram
+# Отправка в Telegram
 # -------------------------------
-def send_photo_to_telegram(image_content):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    files = {"photo": ("gpv.png", image_content)}
-    data = {"chat_id": CHAT_ID}
-
+async def send_photo(bot: Bot, img_content):
     try:
-        response = requests.post(url, data=data, files=files)
-        print("TG response:", response.text)
+        await bot.send_photo(
+            chat_id=CHAT_ID,
+            photo=img_content,
+            caption="⚡ Новое обновление графика отключений электроэнергии"
+        )
+        print(f"✅ [{datetime.now()}] Фото отправлено")
+    except TelegramError as e:
+        print(f"❌ Ошибка Telegram: {e}")
     except Exception as e:
-        print("Помилка TG:", e)
-
+        print(f"❌ Неизвестная ошибка при отправке: {e}")
 
 # -------------------------------
-# Основний цикл моніторингу
+# Проверка страницы
 # -------------------------------
-async def check_loop():
+async def check_page(bot: Bot):
     global last_hash
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        await page.goto(SITE_URL)
+        await page.wait_for_selector(IMG_SELECTOR, timeout=10000)
 
-    while True:
-        try:
-            print(f"[{datetime.now()}] 🔍 Перевірка poweron.loe.lviv.ua")
+        img_element = await page.query_selector(IMG_SELECTOR)
+        if img_element is None:
+            print(f"❌ [{datetime.now()}] Картинка не найдена")
+            await browser.close()
+            return
 
-            # 1. Отримуємо HTML
-            r = requests.get(POWERON_URL, timeout=10)
-            html = r.text
+        img_url = await img_element.get_attribute("src")
+        print(f"Найден URL картинки: {img_url}")
 
-            # 2. Шукаємо картинку через regex
-            image_url = extract_image_url(html)
-            print("Знайдений URL:", image_url)
+        # Скачиваем картинку
+        img_bytes = await page.evaluate("""async (url) => {
+            const res = await fetch(url);
+            const buf = await res.arrayBuffer();
+            return Array.from(new Uint8Array(buf));
+        }""", img_url)
+        img_content = bytes(img_bytes)
 
-            if not image_url:
-                print("❌ Картинка не знайдена у HTML")
-                await asyncio.sleep(CHECK_INTERVAL)
-                continue
+        # Проверяем хеш
+        current_hash = sha256_bytes(img_content)
+        if current_hash != last_hash:
+            print(f"🟢 [{datetime.now()}] Обнаружено новое изображение")
+            last_hash = current_hash
+            await send_photo(bot, img_content)
+        else:
+            print(f"ℹ️ [{datetime.now()}] Без изменений (хеш {current_hash[:8]}...)")
 
-            # 3. Завантажуємо саму картинку
-            img = requests.get(image_url, timeout=10).content
-
-            # 4. Обчислюємо хеш
-            new_hash = sha256_bytes(img)
-
-            # 5. Порівнюємо
-            if new_hash != last_hash:
-                print(f"🟢 Нове зображення! {datetime.now()}")
-                last_hash = new_hash
-                send_photo_to_telegram(img)
-            else:
-                print("Без змін")
-
-        except Exception as e:
-            print("Помилка в циклі:", e)
-
-        # пауза
-        await asyncio.sleep(CHECK_INTERVAL)
-
+        await browser.close()
 
 # -------------------------------
-# Self-Ping (Render не засинає)
+# Основной цикл
+# -------------------------------
+async def main_loop():
+    bot = Bot(token=BOT_TOKEN)
+    async with bot:
+        while True:
+            try:
+                await check_page(bot)
+            except Exception as e:
+                print(f"❌ Ошибка в основном цикле: {e}")
+            await asyncio.sleep(CHECK_INTERVAL)
+
+# -------------------------------
+# Self-ping для Render
 # -------------------------------
 async def self_ping():
+    import aiohttp
     async with aiohttp.ClientSession() as session:
         while True:
             try:
@@ -112,19 +108,8 @@ async def self_ping():
                 pass
             await asyncio.sleep(60)
 
-
 # -------------------------------
-# HTTP-сервер для Render
+# Запуск
 # -------------------------------
-async def index(request):
-    return web.Response(text="✔ Bot is running")
-
-app = web.Application()
-app.add_routes([web.get("/", index)])
-
-# Старт
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(check_loop())
-    loop.create_task(self_ping())
-    web.run_app(app, host="0.0.0.0", port=10000)
+    asyncio.run(asyncio.gather(main_loop(), self_ping()))
