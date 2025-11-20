@@ -79,11 +79,11 @@ async def check_loop():
             new_hash = compute_hash(data)
 
             if last_hash != new_hash:
-                print("🆕 Знайдено ОНОВЛЕННЯ. Надсилаю...")
+                print("🆕 НОВЕ ЗОБРАЖЕННЯ — надсилаю…")
                 await send_to_telegram(img_url, data)
                 last_hash = new_hash
             else:
-                print("ℹ️ Картинка без змін")
+                print("ℹ️ Без змін")
 
             await asyncio.sleep(CHECK_INTERVAL)
 
