@@ -1,125 +1,65 @@
 import asyncio
-import hashlib
+from telethon import TelegramClient
+from aiohttp import ClientSession
 import os
-from aiohttp import ClientSession, web
-from telegram import Bot
-from playwright.async_api import async_playwright
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-CHECK_INTERVAL = 60
-PAGE_URL = "https://poweron.loe.lviv.ua"
+# === КОНФІГУРАЦІЯ ===
+BOT_TOKEN = "8502860111:AAEce5oOYXpbIKynDvmnWv-ehUB39Rfw8hM"
+API_ID = 476351739
+API_HASH = "300474919ffd7aabb34bbd6caf3a0d98"   # <-- ти ще повинен дати мені API_HASH !!
+CHANNEL = "https://t.me/lvivoblenergo"
+CHAT_ID = -1002248750730   # куди надсилати фото
 
-last_hash = None
-
-
-async def send_to_telegram(image_url: str, content: bytes):
-    bot = Bot(token=BOT_TOKEN)
-    await bot.send_photo(
-        chat_id=CHAT_ID,
-        photo=content,
-        caption=f"🔄 Оновлене зображення\n{image_url}"
-    )
+LAST_FILE = "last_id.txt"
 
 
-def compute_hash(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+async def save_last(message_id):
+    with open(LAST_FILE, "w") as f:
+        f.write(str(message_id))
 
 
-async def get_real_image_url() -> str | None:
-    """
-    Відкриває poweron.loe.lviv.ua та перехоплює запити до _GPV.png
-    """
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
-
-        found_url = None
-
-        async def on_request(req):
-            nonlocal found_url
-            url = req.url
-            if url.endswith("_GPV.png") and "api.loe.lviv.ua/media" in url:
-                found_url = url
-
-        page.on("request", on_request)
-
-        await page.goto(PAGE_URL, timeout=60000)
-
-        # чекаємо мережеві запити
-        for _ in range(60):
-            await asyncio.sleep(0.5)
-            if found_url:
-                break
-
-        await browser.close()
-        return found_url
+def load_last():
+    if not os.path.exists(LAST_FILE):
+        return 0
+    with open(LAST_FILE) as f:
+        return int(f.read())
 
 
-async def check_loop():
-    global last_hash
+async def send_to_telegram_photo(url):
+    async with ClientSession() as session:
+        async with session.get(url) as r:
+            photo_bytes = await r.read()
 
     async with ClientSession() as session:
-        while True:
-            print("🔍 Перевіряю оновлення...")
-
-            img_url = await get_real_image_url()
-
-            if not img_url:
-                print("❌ Не знайдено _GPV.png на сайті")
-                await asyncio.sleep(CHECK_INTERVAL)
-                continue
-
-            print(f"🔗 Знайдено картинку: {img_url}")
-
-            async with session.get(img_url) as r:
-                data = await r.read()
-
-            new_hash = compute_hash(data)
-
-            if last_hash != new_hash:
-                print("🆕 НОВЕ ЗОБРАЖЕННЯ — надсилаю…")
-                await send_to_telegram(img_url, data)
-                last_hash = new_hash
-            else:
-                print("ℹ️ Без змін")
-
-            await asyncio.sleep(CHECK_INTERVAL)
-
-
-async def self_ping():
-    url = os.getenv("RENDER_EXTERNAL_URL")
-    if not url:
-        return
-    async with ClientSession() as session:
-        while True:
-            try:
-                async with session.get(url + "/ping") as r:
-                    print(f"[Self-ping] {url} -> {r.status}")
-            except:
-                print("[Self-ping] ERROR")
-            await asyncio.sleep(60)
-
-
-async def handle_ping(request):
-    return web.Response(text="pong")
-
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/ping", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 10000)
-    await site.start()
-    print("🌐 Web server started")
+        await session.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data={"chat_id": CHAT_ID},
+            files={"photo": photo_bytes}
+        )
 
 
 async def main():
-    await start_web_server()
-    await asyncio.gather(check_loop(), self_ping())
+    client = TelegramClient("session", API_ID, API_HASH)
+
+    print("⏳ Connecting to Telegram…")
+    await client.start(bot_token=BOT_TOKEN)
+    print("✅ Connected")
+
+    last_id = load_last()
+
+    while True:
+        async for msg in client.iter_messages(CHANNEL, limit=1):
+            if msg.id != last_id and msg.photo:
+                print(f"📸 NEW photo found (ID={msg.id})")
+
+                photo = await msg.download_media()
+                if photo:
+                    print("➡️ Sending to Telegram chat…")
+                    await send_to_telegram_photo(msg.photo.sizes[-1].location.to_url())
+
+                await save_last(msg.id)
+
+        await asyncio.sleep(30)   # перевіряємо кожні 30 сек
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
