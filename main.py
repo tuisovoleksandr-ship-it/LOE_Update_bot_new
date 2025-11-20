@@ -14,7 +14,7 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 300))
 PORT = int(os.environ.get("PORT", 10000))
 SELF_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
 
-# Пряма картинка (змінюється назва файлу, якщо потрібно, можна довантажувати список)
+# Пряма картинка GPV-mobile
 IMAGE_URL = "https://api.loe.lviv.ua/media/691d6ab3b2c3a_GPV-mobile.png"
 # -----------------------------------------------------
 
@@ -71,7 +71,20 @@ async def check_image():
 
                             if last_hash is None:
                                 print(f"[{now}] Перший запуск, хеш збережено: {current_hash[:8]}...")
+                                # --- ВІДПРАВКА НА ПЕРШИЙ ЗАПУСК ---
+                                try:
+                                    await bot.send_photo(
+                                        chat_id=CHAT_ID,
+                                        photo=data,
+                                        caption="⚡ Перший запуск — поточна картинка графіка відключень"
+                                    )
+                                    print(f"[{now}] ✅ Зображення відправлено при першому запуску")
+                                except TelegramError as e:
+                                    print(f"[{now}] ❌ Помилка Telegram при першому запуску: {e}")
+                                except Exception as e:
+                                    print(f"[{now}] ❌ Невідома помилка при першому запуску: {e}")
                                 last_hash = current_hash
+
                             elif current_hash != last_hash:
                                 print(f"[{now}] 🟢 Зміни знайдено! Новий хеш: {current_hash[:8]}...")
                                 try:
