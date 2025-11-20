@@ -1,111 +1,132 @@
-import aiohttp
 import asyncio
 import hashlib
-import os
+import aiohttp
 from aiohttp import web
+from playwright.async_api import async_playwright
+import os
 from datetime import datetime
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-SELF_URL = os.environ.get("EXTERNAL_URL")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 300))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+SELF_URL = os.getenv("SELF_URL")
+
+CHECK_INTERVAL = 300
 
 HASH_FILE = "last_hash.txt"
-API_FOLDER = "https://api.loe.lviv.ua/media/"
-SUFFIX = "_GPV-mobile.png"
 
-# ----------------- Зберігання хеша -----------------
+
+async def send_to_telegram(image_url):
+    async with aiohttp.ClientSession() as session:
+        await session.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data={"chat_id": CHAT_ID, "caption": "Оновлене зображення"},
+            files={"photo": (image_url, await session.get(image_url).then(lambda r: r.read()))},
+        )
+
 
 def load_last_hash():
-    if os.path.exists(HASH_FILE):
-        return open(HASH_FILE).read().strip()
-    return None
+    if not os.path.exists(HASH_FILE):
+        return None
+    with open(HASH_FILE, "r") as f:
+        return f.read().strip()
+
 
 def save_last_hash(h):
     with open(HASH_FILE, "w") as f:
         f.write(h)
 
-# ----------------- Пошук картинки -----------------
 
-async def find_latest_image():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(API_FOLDER) as r:
-            if r.status == 403:
-                # каталоги закриті → робимо brute-force через HEAD
-                for i in range(1, 999):
-                    guess = f"{API_FOLDER}{i:03d}_GPV-mobile.png"
-                    async with session.head(guess) as h:
-                        if h.status == 200:
-                            return guess
-                return None
-            else:
-                html = await r.text()
-                # каталог відкритий (малоймовірно)
-                import re
-                found = re.findall(r'href="([^"]+GPV-mobile\.png)"', html)
-                if found:
-                    return API_FOLDER + found[-1]
-                return None
+async def get_latest_image_url():
+    """
+    Виловити з Network будь-який файл, що закінчується на _GPV.png
+    """
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch()
+        page = await browser.new_page()
 
-# ----------------- Відправка картинки -----------------
+        found_url = None
 
-async def send_telegram(image_url):
-    async with aiohttp.ClientSession() as s:
-        # Завантажуємо файл
-        async with s.get(image_url) as r:
-            data = await r.read()
+        def handle_response(response):
+            nonlocal found_url
+            url = response.url
+            if url.endswith("_GPV.png"):  # ❗ ОДНА картинка, завжди кінцівка _GPV.png
+                found_url = url
 
-        form = aiohttp.FormData()
-        form.add_field("chat_id", CHAT_ID)
-        form.add_field("photo", data, filename="update.png", content_type="image/png")
+        page.on("response", handle_response)
 
-        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form) as resp:
-            print("Telegram response:", await resp.text())
+        await page.goto("https://poweron.loe.lviv.ua", timeout=60000)
+        await asyncio.sleep(5)
 
-# ----------------- Основний цикл -----------------
+        await browser.close()
 
-async def checker():
-    last_hash = load_last_hash()
+        return found_url
+
+
+async def check_loop():
+    print("Фоновий цикл запущено.")
 
     while True:
-        url = await find_latest_image()
+        print("\n--- Перевірка ---")
+        image_url = await get_latest_image_url()
 
-        if not url:
+        if not image_url:
             print("❌ Картинку не знайдено")
-            await asyncio.sleep(CHECK_INTERVAL)
-            continue
-
-        new_hash = hashlib.md5(url.encode()).hexdigest()
-
-        if last_hash != new_hash:
-            print("🔔 Знайдено нову картинку:", url)
-            await send_telegram(url)
-            save_last_hash(new_hash)
-            last_hash = new_hash
         else:
-            print("[", datetime.now(), "] Змін немає")
+            print(f"🔗 Знайдено картинку: {image_url}")
+
+            async with aiohttp.ClientSession() as session:
+                img = await (await session.get(image_url)).read()
+                new_hash = hashlib.md5(img).hexdigest()
+                old_hash = load_last_hash()
+
+            if old_hash != new_hash:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                print(f"🆕 НОВЕ ЗОБРАЖЕННЯ ({timestamp}) → Відправляю у Telegram…")
+
+                save_last_hash(new_hash)
+                await send_to_telegram(image_url)
+            else:
+                print("🔁 Картинка не змінилась.")
 
         await asyncio.sleep(CHECK_INTERVAL)
 
-# ----------------- Self-ping сервер -----------------
 
 async def handle_ping(request):
     return web.Response(text="OK")
 
-async def start_server():
+
+async def create_app():
     app = web.Application()
-    app.add_routes([web.get("/ping", handle_ping)])
+    app.router.add_get("/ping", handle_ping)
+    return app
+
+
+async def self_ping():
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.get(SELF_URL + "/ping")
+                print(f"[{datetime.now()}] Self-ping OK")
+        except Exception as e:
+            print(f"Self-ping error: {e}")
+
+        await asyncio.sleep(60)
+
+
+async def main():
+    app = await create_app()
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 10000)
     await site.start()
+
     print("🌐 Web server started on port 10000")
 
-# ----------------- MAIN -----------------
+    await asyncio.gather(
+        check_loop(),
+        self_ping(),
+    )
 
-async def main():
-    await start_server()
-    await checker()
 
 if __name__ == "__main__":
     asyncio.run(main())
