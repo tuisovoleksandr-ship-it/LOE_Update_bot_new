@@ -5,7 +5,7 @@ import os
 
 # === КОНФІГУРАЦІЯ ===
 BOT_TOKEN = "8502860111:AAEce5oOYXpbIKynDvmnWv-ehUB39Rfw8hM"
-API_ID = 476351739
+API_ID = 36553216
 API_HASH = "300474919ffd7aabb34bbd6caf3a0d98"   # <-- ти ще повинен дати мені API_HASH !!
 CHANNEL = "https://t.me/lvivoblenergo"
 CHAT_ID = -1002248750730   # куди надсилати фото
