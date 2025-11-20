@@ -2,40 +2,39 @@ import asyncio
 import hashlib
 import datetime
 import os
+import re
+import aiohttp
 from aiohttp import web
-from playwright.async_api import async_playwright
 
 # ---------------------- CONFIG ----------------------
 CHECK_URL = "https://poweron.loe.lviv.ua"
-IMAGE_SELECTOR = "img"       # або можеш замінити на конкретний селектор
-CHECK_INTERVAL = 60          # 60 сек
-SELF_PING_INTERVAL = 120     # 2 хв
+CHECK_INTERVAL = 60
+SELF_PING_INTERVAL = 120
 PORT = int(os.environ.get("PORT", 10000))
 SELF_URL = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
 # -----------------------------------------------------
 
 last_hash = None
 
-
-async def fetch_image_url(playwright):
-    """Отримує HTML через Chromium і шукає перше зображення."""
-    browser = await playwright.chromium.launch(headless=True)
-    page = await browser.new_page()
-
+async def fetch_image_url():
+    """Завантажує HTML і знаходить перший <img src="...">."""
     try:
-        await page.goto(CHECK_URL, timeout=30000)
-        await page.wait_for_selector(IMAGE_SELECTOR, timeout=15000)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(CHECK_URL, timeout=30) as resp:
+                html = await resp.text()
 
-        img = await page.query_selector(IMAGE_SELECTOR)
-        if img:
-            src = await img.get_attribute("src")
-            # Робимо абсолютний URL
+        match = re.search(r'<img[^>]+src="([^"]+)"', html)
+        if match:
+            src = match.group(1)
             if src.startswith("/"):
                 src = CHECK_URL.rstrip("/") + src
             return src
+
         return None
-    finally:
-        await browser.close()
+
+    except Exception as e:
+        print("Помилка fetch_image_url:", e)
+        return None
 
 
 def hash_string(s: str) -> str:
@@ -43,16 +42,14 @@ def hash_string(s: str) -> str:
 
 
 async def check_updates():
-    """Перевірка змін."""
     global last_hash
 
     while True:
         try:
-            async with async_playwright() as p:
-                img_url = await fetch_image_url(p)
+            img_url = await fetch_image_url()
 
             if img_url is None:
-                print("❌ Не знайшов зображення на сторінці")
+                print("❌ Картинку не знайдено")
             else:
                 new_hash = hash_string(img_url)
                 print(f"[{datetime.datetime.now()}] Поточний хеш: {new_hash}")
@@ -61,26 +58,25 @@ async def check_updates():
                     print("Хеш відсутній — перший запуск")
                     last_hash = new_hash
                 elif new_hash != last_hash:
-                    print("🟢 Зміни знайдено!")
+                    print("🟢 ЗМІНИ ЗНАЙДЕНО!")
                     last_hash = new_hash
                 else:
                     print("ℹ️  Змін немає")
 
         except Exception as e:
-            print("Помилка перевірки:", e)
+            print("Помилка check_updates:", e)
 
         await asyncio.sleep(CHECK_INTERVAL)
 
 
 async def self_ping():
-    """Щоб Render не заснув."""
+    """Щоб Render не засинав."""
     if not SELF_URL:
         print("⚠️ SELF_URL не встановлено — self-ping вимкнено")
         return
 
     while True:
         try:
-            import aiohttp
             async with aiohttp.ClientSession() as session:
                 ping_url = f"{SELF_URL}/ping"
                 async with session.get(ping_url) as r:
@@ -96,7 +92,6 @@ async def handle_ping(request):
 
 
 async def start_web_server():
-    """Локальний сервер на Render."""
     app = web.Application()
     app.router.add_get("/ping", handle_ping)
     runner = web.AppRunner(app)
