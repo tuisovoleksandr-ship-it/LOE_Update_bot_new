@@ -1,120 +1,81 @@
-import aiohttp
 import asyncio
 import os
-import re
-from datetime import datetime, UTC
+import datetime
+from playwright.async_api import async_playwright
 from aiohttp import web
-from telegram import Bot
 
-# --------------------------- CONFIG ---------------------------
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
 SELF_URL = os.environ.get("SELF_URL")
-CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 120))
-
-bot = Bot(token=BOT_TOKEN)
-
-
-# ---------------------- SELF-PING WEB SERVER ------------------
-async def handle_ping(request):
-    return web.Response(text="OK")
-
-async def start_web_server():
-    app = web.Application()
-    app.router.add_get("/ping", handle_ping)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-
-    site = web.TCPSite(runner, "0.0.0.0", 10000)
-    await site.start()
-    print("🌐 Web server started on port 10000")
+TARGET_URL = "https://poweron.loe.lviv.ua"
+CHECK_INTERVAL = 300  # 5 хв
+LAST_IMAGE = None
 
 
-# ------------------------- SEND PHOTO -------------------------
-async def send_photo(url):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                print("❌ Не можу завантажити фото:", resp.status)
-                return
-            img = await resp.read()
+async def fetch_image_url():
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
 
-    await bot.send_photo(chat_id=CHAT_ID, photo=img)
-    print("📤 Відправлено в Telegram:", url)
+        try:
+            await page.goto(TARGET_URL, timeout=45000)
 
+            # Чекаємо поки React намалює <img>
+            await page.wait_for_selector("img[src]", timeout=20000)
 
-# ----------------------- PARSE <img> --------------------------
-async def get_image_url():
-    MAIN_URL = "https://poweron.loe.lviv.ua"
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(MAIN_URL) as resp:
-            if resp.status != 200:
-                print("❌ HTML не отримано:", resp.status)
+            img = await page.query_selector("img[src]")
+            if not img:
                 return None
 
-            html = await resp.text()
+            src = await img.get_attribute("src")
+            if src and src.startswith("http"):
+                return src
+            elif src:
+                return TARGET_URL + src
+            return None
 
-    # Шукаємо <img src="https://api.loe.lviv.ua/media/....png">
-    match = re.search(
-        r'src="(https://api\.loe\.lviv\.ua/media/[A-Za-z0-9_]+\.(?:png|jpg|jpeg))"',
-        html
-    )
-
-    if not match:
-        print("❌ <img> з картинкою не знайдено")
-        return None
-
-    return match.group(1)
+        finally:
+            await browser.close()
 
 
-# -------------------- CHECK LOOP (main logic) --------------------
-async def check_loop():
-    last_url = None
+async def monitor(bot=None, chat_id=None):
+    global LAST_IMAGE
 
     while True:
-        print(f"\n🔄 Перевірка... {datetime.now(UTC)}")
+        print("\nПеревірка...", datetime.datetime.now(datetime.timezone.utc))
 
-        img = await get_image_url()
+        if not SELF_URL:
+            print("⚠️ SELF_URL не задано — self-ping не працює")
 
-        if not img:
+        url = await fetch_image_url()
+        if not url:
             print("❌ Картинка не знайдена")
         else:
-            print("🔗 Знайдена картинка:", img)
+            print(f"🟩 Знайдено картинку: {url}")
 
-            if img != last_url:
-                print("🆕 Нова картинка → відправляю в Telegram")
-                await send_photo(img)
-                last_url = img
+            if url != LAST_IMAGE:
+                print("🔄 Картинка змінилася!")
+                LAST_IMAGE = url
             else:
-                print("✓ Картинка без змін")
+                print("✔ Картинка без змін")
 
         await asyncio.sleep(CHECK_INTERVAL)
 
 
-# ---------------------- SELF-PING LOOP -------------------------
-async def self_ping_loop():
-    if not SELF_URL:
-        print("⚠️ SELF_URL не задано — self-ping не працює")
-        return
-
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(SELF_URL + "/ping") as resp:
-                    print(f"[{datetime.now(UTC)}] Self-ping →", resp.status)
-        except Exception as e:
-            print("⚠️ Self-ping error:", e)
-
-        await asyncio.sleep(60)
+async def handle_ping(request):
+    return web.Response(text="ok")
 
 
-# ----------------------------- MAIN ----------------------------
-async def main():
-    await start_web_server()
-    await asyncio.gather(check_loop(), self_ping_loop())
+async def create_app():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+
+    asyncio.create_task(monitor())
+    return app
+
+
+def main():
+    app = create_app()
+    web.run_app(app, port=8080)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
