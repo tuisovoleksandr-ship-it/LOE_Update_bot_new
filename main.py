@@ -1,134 +1,131 @@
 import asyncio
-from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
+import aiohttp
+from bs4 import BeautifulSoup
+import hashlib
 import os
+from datetime import datetime
+from aiohttp import web
 
-# === КОНФІГУРАЦІЯ ===
-# API_ID та API_HASH повинні належати вашому користувацькому акаунту!
-# Їх можна отримати на https://my.telegram.org/auth
-API_ID = 36553216
-API_HASH = "300474919ffd7aabb34bbd6caf3a0d98"  # <-- ВАШ API_HASH
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+LAST_HASH_FILE = "last_hash.txt"
 
-# Токен бота використовується лише для надсилання файлів у кінцевий чат
-BOT_TOKEN = "8502860111:AAEce5oOYXpbIKynDvmnWv-ehUB39Rfw8hM" 
+URL = "https://poweron.loe.lviv.ua"
 
-# Канал для моніторингу (зчитуємо як користувач)
-CHANNEL = "lvivoblenergo" 
-# ID чату або каналу, куди надсилати фото (надсилаємо як бот)
-CHAT_ID = -1002248750730 
+async def fetch_image_url():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(URL) as resp:
+            if resp.status != 200:
+                print("❌ Не удалось загрузить страницу")
+                return None
 
-# Назва файлу сесії. У ньому буде зберігатися авторизація користувача.
-SESSION_NAME = "user_session"
-LAST_FILE = "last_id.txt"
+            html = await resp.text()
+            soup = BeautifulSoup(html, "html.parser")
 
-# --- Функції для збереження/завантаження останнього ID залишаються без змін ---
+            img = soup.find("img")
+            if not img:
+                print("❌ <img> не найден")
+                return None
 
-def save_last(message_id):
-    """Зберігає ID останнього обробленого повідомлення у файл."""
-    with open(LAST_FILE, "w") as f:
-        f.write(str(message_id))
+            src = img.get("src")
+            if not src:
+                print("❌ src не найден")
+                return None
 
+            # Если путь относительный — добавляем домен
+            if src.startswith("/"):
+                src = "https://poweron.loe.lviv.ua" + src
 
-def load_last():
-    """Завантажує ID останнього обробленого повідомлення з файлу."""
-    if not os.path.exists(LAST_FILE):
-        return 0
-    with open(LAST_FILE) as f:
-        try:
-            return int(f.read().strip())
-        except ValueError:
-            return 0
+            return src
 
 
-# --- Основна логіка ---
+async def download_image(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                print("❌ Ошибка загрузки картинки:", resp.status)
+                return None
+            return await resp.read()
+
+
+def calc_hash(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def load_last_hash():
+    if not os.path.exists(LAST_HASH_FILE):
+        return None
+    return open(LAST_HASH_FILE).read().strip()
+
+
+def save_last_hash(h):
+    with open(LAST_HASH_FILE, "w") as f:
+        f.write(h)
+
+
+async def send_to_telegram(image_bytes):
+    async with aiohttp.ClientSession() as session:
+        form = aiohttp.FormData()
+        form.add_field("chat_id", CHAT_ID)
+        form.add_field("photo", image_bytes, filename="image.png")
+
+        async with session.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+            data=form
+        ) as resp:
+            if resp.status == 200:
+                print("📨 Картинка отправлена в Telegram")
+            else:
+                print("❌ Ошибка Telegram:", resp.status, await resp.text())
+
+
+async def check_loop():
+    while True:
+        print("\n🔄 Проверка...", datetime.utcnow())
+
+        image_url = await fetch_image_url()
+        if not image_url:
+            await asyncio.sleep(60)
+            continue
+
+        print("🔗 Найдено изображение:", image_url)
+
+        img = await download_image(image_url)
+        if not img:
+            await asyncio.sleep(60)
+            continue
+
+        new_hash = calc_hash(img)
+        last_hash = load_last_hash()
+
+        if new_hash != last_hash:
+            print("🆕 Новое изображение! Отправляем в Telegram…")
+            await send_to_telegram(img)
+            save_last_hash(new_hash)
+        else:
+            print("➖ Картинка не изменилась")
+
+        await asyncio.sleep(60)
+
+
+async def ping_handler(request):
+    return web.Response(text="pong")
+
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/ping", ping_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 10000)
+    await site.start()
+    print("🌐 Web server started on port 10000")
+
 
 async def main():
-    # Ініціалізуємо клієнта як користувача. 
-    # Клієнт буде використовувати наш API_ID та API_HASH
-    client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
-
-    print("⏳ Connecting to Telegram as User...")
-    
-    # Запускаємо клієнта. При першому запуску тут буде запит на номер телефону/код.
-    await client.start()
-    
-    user_info = await client.get_me()
-    print(f"✅ Connected as user: @{user_info.username} (ID: {user_info.id})")
-
-    last_id = load_last()
-    print(f"Loaded last processed ID: {last_id}")
-
-    # =========================================================================
-    # ВАЖЛИВО: Оскільки ми використовуємо ТОКЕН БОТА для відправки, нам потрібен 
-    # окремий клієнт-бот для функції відправки. 
-    # У Telethon не можна використовувати один клієнт одночасно як користувача і як бота.
-    
-    bot_client = TelegramClient('bot_sender', API_ID, API_HASH)
-    await bot_client.start(bot_token=BOT_TOKEN)
-    print(f"✅ Bot sender connected: @{(await bot_client.get_me()).username}")
-    
-    # =========================================================================
-
-    while True:
-        try:
-            # Читаємо канал як користувач (можна читати історію)
-            messages = await client.get_messages(CHANNEL, limit=1)
-
-            if messages:
-                msg = messages[0]
-                
-                if msg.id > last_id and msg.photo:
-                    print(f"\n📸 NEW photo found (ID={msg.id}) from {CHANNEL}")
-                    
-                    # 1. Завантажуємо фото у пам'ять/на диск (потрібно для відправки ботом)
-                    print("➡️ Downloading media...")
-                    # Завантажуємо медіафайл. Telethon повертає шлях до збереженого файлу.
-                    photo_path = await client.download_media(msg.photo)
-                    
-                    if photo_path:
-                        # 2. Відправляємо фото через клієнта-бота
-                        print("➡️ Sending file via Bot client...")
-                        await bot_client.send_file(
-                            entity=CHAT_ID,
-                            file=photo_path,
-                            caption=msg.text or "Нове фото"
-                        )
-                        print("✅ Photo sent successfully.")
-                        
-                        # 3. Видаляємо тимчасовий файл
-                        os.remove(photo_path)
-                        
-                        # Зберігаємо ID лише після успішного надсилання
-                        await save_last(msg.id)
-                        last_id = msg.id
-                        
-                elif msg.id > last_id:
-                    print(f"ℹ️ Skipping new message (ID={msg.id}) - not a photo.")
-                    await save_last(msg.id)
-                    last_id = msg.id
-            else:
-                print("ℹ️ No messages found (check if channel name is correct).")
-
-        except SessionPasswordNeededError:
-             # Обробка 2FA, якщо ви не ввели пароль при першому запуску
-            print("❌ ERROR: Two-Factor Authentication required. Please restart and follow prompts.")
-            break
-        except Exception as e:
-            print(f"❌ UNEXPECTED ERROR during message check: {e}")
-            
-        print(f"Sleeping for 30 seconds... (Last ID: {last_id})")
-        await asyncio.sleep(30)
-    
-    # Обов'язково закриваємо обидва клієнти при завершенні
-    await client.disconnect()
-    await bot_client.disconnect()
+    await start_web_server()
+    await check_loop()
 
 
 if __name__ == "__main__":
-    try:
-        # Для коректного завершення
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\nBot stopped by user.")
-    except Exception as e:
-        print(f"An unexpected error occurred in the runner: {e}")
+    asyncio.run(main())
