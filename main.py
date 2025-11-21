@@ -1,89 +1,122 @@
-import asyncio
 import aiohttp
+import asyncio
 import os
 import re
-from datetime import datetime, timezone
 from telegram import Bot
-from telegram.constants import ParseMode
+from datetime import datetime
+from aiohttp import web
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+SELF_URL = os.environ.get("SELF_URL", "")
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", 120))
 
-API_MEDIA = "https://api.loe.lviv.ua/media/"
-CHECK_INTERVAL = 60  # секунд
+bot = Bot(token=BOT_TOKEN)
 
-bot = Bot(BOT_TOKEN)
+# ------------------------- Веб-сервер для self-ping -------------------------
+async def handle_ping(request):
+    return web.Response(text="OK")
 
-
-def load_last_image():
-    """Читаємо останній файл, який уже постили."""
-    if not os.path.exists("last_image.txt"):
-        return None
-    try:
-        with open("last_image.txt", "r") as f:
-            return f.read().strip()
-    except:
-        return None
-
-
-def save_last_image(url):
-    """Зберігаємо файл, щоб не постити двічі."""
-    with open("last_image.txt", "w") as f:
-        f.write(url)
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/ping", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 10000)
+    await site.start()
+    print("🌐 Web server started on port 10000")
 
 
-async def get_latest_image():
-    """Отримуємо список файлів у каталозі /media/."""
-    headers = {"User-Agent": "Mozilla/5.0"}
+# ------------------------ Отправка картинки ------------------------------
+async def send_photo(url):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                print("❌ Не можу завантажити фото:", resp.status)
+                return
+            img = await resp.read()
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        try:
-            async with session.get(API_MEDIA) as r:
-                if r.status != 200:
-                    print("❌ Ошибка получения списка:", r.status)
-                    return None
-                html = await r.text()
-        except Exception as e:
-            print("❌ Ошибка запроса:", e)
+    await bot.send_photo(chat_id=CHAT_ID, photo=img)
+    print("📤 Відправлено в Telegram:", url)
+
+
+# ------------------------ Основна логіка парсингу --------------------------
+async def get_image_url():
+    MAIN_URL = "https://poweron.loe.lviv.ua"
+
+    async with aiohttp.ClientSession() as session:
+        # 1. Отримуємо HTML
+        async with session.get(MAIN_URL) as resp:
+            html = await resp.text()
+
+        # 2. Шукаємо ім'я JS-файла
+        js_match = re.search(r'/static/js/main\.[a-zA-Z0-9]+\.js', html)
+        if not js_match:
+            print("❌ Не можу знайти main.js")
             return None
 
-    # Пошук посилання на GPV-mobile
-    matches = re.findall(r'href="([^"]+GPV-mobile[^"]+)"', html)
+        js_path = js_match.group(0)
+        js_url = MAIN_URL + js_path
 
-    if not matches:
-        print("❌ Не найден ни один файл GPV-mobile")
-        return None
+        # 3. Завантажуємо JS
+        async with session.get(js_url) as resp:
+            js_code = await resp.text()
 
-    latest = matches[-1]
-    return API_MEDIA + latest
+        # 4. Дістаємо шлях картинки
+        img_match = re.search(r'https://api\.loe\.lviv\.ua/media/[A-Za-z0-9_]+\.(?:png|jpg|jpeg)', js_code)
 
+        if not img_match:
+            print("❌ Не знайдено GPV-mobile")
+            return None
 
-async def send_to_telegram(url):
-    """Відправляємо фото по URL через Bot API."""
-    try:
-        await bot.send_photo(chat_id=CHAT_ID, photo=url)
-        print("📤 Відправлено:", url)
-    except Exception as e:
-        print("❌ Помилка відправки:", e)
+        return img_match.group(0)
 
 
-async def main():
-    last_sent = load_last_image()
+# ------------------------ Цикл перевірки --------------------------
+async def check_loop():
+    last = ""
 
     while True:
-        print("\n🔄 Перевірка...", datetime.now(timezone.utc))
+        print("\n🔄 Перевірка...", datetime.utcnow())
 
-        url = await get_latest_image()
+        img = await get_image_url()
 
-        if url and url != last_sent:
-            print("🆕 Нове зображення:", url)
-            await send_to_telegram(url)
-            save_last_image(url)
-            last_sent = url
+        if not img:
+            print("❌ Картинка не знайдена")
         else:
-            print("ℹ️ Немає оновлень")
+            print("🔗 Знайдена картинка:", img)
+
+            if img != last:
+                print("🆕 Нова картинка → відправляю в Telegram")
+                await send_photo(img)
+                last = img
+            else:
+                print("✓ Картинка без змін")
 
         await asyncio.sleep(CHECK_INTERVAL)
+
+
+# ------------------------ Self-ping --------------------------
+async def self_ping_loop():
+    if not SELF_URL:
+        print("⚠️ SELF_URL не задано")
+        return
+
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(SELF_URL + "/ping") as resp:
+                    print(f"[{datetime.utcnow()}] Self-ping →", resp.status)
+        except:
+            print("⚠️ Self-ping error")
+
+        await asyncio.sleep(60)
+
+
+# -------------------------- Main ------------------------------
+async def main():
+    await start_web_server()
+    await asyncio.gather(check_loop(), self_ping_loop())
 
 
 if __name__ == "__main__":
