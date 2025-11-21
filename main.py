@@ -4,6 +4,7 @@ import os
 import re
 from datetime import datetime, timezone
 from telegram import Bot
+from telegram.constants import ParseMode
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -32,7 +33,7 @@ def save_last_image(url):
 
 
 async def get_latest_image():
-    """Одержуємо HTML зі списком файлів у папці /media/."""
+    """Отримуємо список файлів у каталозі /media/."""
     headers = {"User-Agent": "Mozilla/5.0"}
 
     async with aiohttp.ClientSession(headers=headers) as session:
@@ -46,19 +47,19 @@ async def get_latest_image():
             print("❌ Ошибка запроса:", e)
             return None
 
-    # Шукаємо посилання на файл з GPV-mobile
+    # Пошук посилання на GPV-mobile
     matches = re.findall(r'href="([^"]+GPV-mobile[^"]+)"', html)
 
     if not matches:
         print("❌ Не найден ни один файл GPV-mobile")
         return None
 
-    latest = matches[-1]  # останній файл у списку
+    latest = matches[-1]
     return API_MEDIA + latest
 
 
 async def send_to_telegram(url):
-    """Відправляємо фото по URL."""
+    """Відправляємо фото по URL через Bot API."""
     try:
         await bot.send_photo(chat_id=CHAT_ID, photo=url)
         print("📤 Відправлено:", url)
